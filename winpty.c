@@ -1,50 +1,15 @@
 #include <wchar.h>
 #include <stdlib.h>
 #include <assert.h>
+#include <stdio.h>
 #include <windows.h>
 
 #include "winpty.h"
+#include "util.h"
 
 #define PROC_LIST_SIZE 64
 
-// Taken from the RS5 Windows SDK, but redefined here in case we're targeting <= 17134
-#ifndef PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE
-#define DYNLOAD_CONPTY
-
-#define PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE \
-	ProcThreadAttributeValue(22, FALSE, TRUE, FALSE)
-
-typedef void *HPCON;
-
-typedef HRESULT (*PFN_CREATE_PSEUDO_CONSOLE)(COORD size, HANDLE input, HANDLE output, DWORD flags, HPCON *con);
-typedef HRESULT (*PFN_RESIZE_PSEUDO_CONSOLE)(HPCON con, COORD size);
-typedef void (*PFN_CLOSE_PSEUDO_CONSOLE)(HPCON *con);
-
-static PFN_CREATE_PSEUDO_CONSOLE CreatePseudoConsole = NULL;
-static PFN_RESIZE_PSEUDO_CONSOLE ResizePseudoConsole = NULL;
-static PFN_CLOSE_PSEUDO_CONSOLE ClosePseudoConsole = NULL;
-#endif
-
 static volatile long pipe_number;
-
-
-// UTILS
-static LPWSTR strdup_w(LPCWSTR str) {
-	LPWSTR new_str = malloc(sizeof(WCHAR) * (wcslen(str) + 1));
-	if (new_str == NULL)
-		return NULL;
-
-	wcscpy(new_str, str);
-	return new_str;
-}
-
-
-// ERROR HANDLING
-struct winpty_error_s {
-	winpty_result_t code;
-	LPCWSTR cstr;
-	LPWSTR dstr;
-};
 
 static struct winpty_error_s E_OUT_OF_MEMORY = {
 	WINPTY_ERROR_OUT_OF_MEMORY,
@@ -54,23 +19,7 @@ static struct winpty_error_s E_OUT_OF_MEMORY = {
 
 static LPCWSTR E_UNSPECIFIED = L"Unspecified error";
 
-static LPWSTR win32_error(DWORD rc) {
-	LPWSTR msg = NULL;
-	FormatMessageW(
-		FORMAT_MESSAGE_ALLOCATE_BUFFER
-		| FORMAT_MESSAGE_FROM_SYSTEM
-		| FORMAT_MESSAGE_IGNORE_INSERTS,
-		NULL,
-		rc,
-		MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-		(LPWSTR) &msg,
-		0,
-		NULL
-	);
-
-	return msg;
-}
-
+// ERROR HANDLING
 static winpty_error_ptr_t winpty_error_new(int code, DWORD rc, LPCWSTR msg) {
 	if (code == WINPTY_ERROR_OUT_OF_MEMORY)
 		return &E_OUT_OF_MEMORY;
@@ -87,8 +36,8 @@ static winpty_error_ptr_t winpty_error_new(int code, DWORD rc, LPCWSTR msg) {
 		if (new_str == NULL)
 			goto out_of_memory;
 
-		swprintf(new_str, new_len, L"%ls: %ls", win_err, msg);
-		free(win_err);
+		swprintf(new_str, new_len, L"%ls: %ls", msg, win_err);
+		LocalFree(win_err);
 
 		err->dstr = new_str;
 	} else if (msg != NULL) {
@@ -106,6 +55,10 @@ out_of_memory:
 	free(err);
 	return &E_OUT_OF_MEMORY;
 }
+
+#define THROW(code, rc, msg) 					\
+	if (err != NULL)							\
+		*err = winpty_error_new(code, rc, msg)
 
 WINPTY_API winpty_result_t winpty_error_code(winpty_error_ptr_t err) {
 	return err->code;
@@ -149,22 +102,19 @@ static DWORD load_conpty() {
 WINPTY_API BOOL winpty_load_conpty(winpty_error_ptr_t *err) {
 	DWORD rc = load_conpty();
 	if (rc != ERROR_SUCCESS)
-		*err = winpty_error_new(WINPTY_ERROR_UNSPECIFIED, rc, L"cannot load ConPty");
+		THROW(WINPTY_ERROR_UNSPECIFIED, rc, L"cannot load conpty");
 	return rc == ERROR_SUCCESS;
 }
 
 
 // WINPTY CONFIG
-struct winpty_config_s {
-	COORD size;
-	int mouse_mode;
-};
-
 WINPTY_API winpty_config_t *winpty_config_new(UINT64 agentFlags, winpty_error_ptr_t *err) {
 	assert(load_conpty() == ERROR_SUCCESS);
 	winpty_config_t *config = calloc(1, sizeof(winpty_config_t));
-	if (config == NULL)
-		*err = winpty_error_new(WINPTY_ERROR_OUT_OF_MEMORY, 0, NULL);
+	if (config == NULL) {
+		THROW(WINPTY_ERROR_OUT_OF_MEMORY, 0, NULL);
+		return NULL;
+	}
 	return config;
 }
 
@@ -185,12 +135,6 @@ WINPTY_API void winpty_config_set_agent_timeout(winpty_config_t *config, DWORD t
 
 
 // STARTING PTYs
-struct winpty_s {
-	HPCON con;
-	LPWSTR conin_name, conout_name, conerr_name;
-	HANDLE thread, proc;
-};
-
 static HANDLE create_pipe(LPWSTR *pipe_name) {
 	*pipe_name = malloc(sizeof(WCHAR) * MAX_PATH);
 	if (*pipe_name == NULL)
@@ -215,33 +159,40 @@ WINPTY_API winpty_t *winpty_open(const winpty_config_t *config, winpty_error_ptr
 		*err = winpty_error_new(WINPTY_ERROR_OUT_OF_MEMORY, 0, NULL);
 		return NULL;
 	}
+	
+	InitializeCriticalSection(&pty->mutex);
 
 	HANDLE conin = create_pipe(&pty->conin_name);
 	if (conin == INVALID_HANDLE_VALUE) {
 		if (pty->conin_name == NULL)
-			*err = winpty_error_new(WINPTY_ERROR_OUT_OF_MEMORY, 0, NULL);
+			THROW(WINPTY_ERROR_OUT_OF_MEMORY, 0, NULL);
 		else
-			*err = winpty_error_new(WINPTY_ERROR_UNSPECIFIED, GetLastError(), L"cannot create stdin pipe");
+			THROW(WINPTY_ERROR_UNSPECIFIED, GetLastError(), L"cannot create stdin pipe");
 		goto cleanup;
 	}
 
 	HANDLE conout = create_pipe(&pty->conout_name);
 	if (conout == INVALID_HANDLE_VALUE) {
 		if (pty->conout_name == NULL)
-			*err = winpty_error_new(WINPTY_ERROR_OUT_OF_MEMORY, 0, NULL);
+			THROW(WINPTY_ERROR_OUT_OF_MEMORY, 0, NULL);
 		else
-			*err = winpty_error_new(WINPTY_ERROR_UNSPECIFIED, GetLastError(), L"cannot create stdout pipe");
+			THROW(WINPTY_ERROR_UNSPECIFIED, GetLastError(), L"cannot create stdout pipe");
 		goto cleanup;
 	}
 
 	HANDLE conerr = create_pipe(&pty->conerr_name);
 	if (conerr == INVALID_HANDLE_VALUE) {
 		if (pty->conerr_name == NULL)
-			*err = winpty_error_new(WINPTY_ERROR_OUT_OF_MEMORY, 0, NULL);
+			THROW(WINPTY_ERROR_OUT_OF_MEMORY, 0, NULL);
 		else
-			*err = winpty_error_new(WINPTY_ERROR_UNSPECIFIED, GetLastError(), L"cannot create stderr pipe");
+			THROW(WINPTY_ERROR_UNSPECIFIED, GetLastError(), L"cannot create stderr pipe");
 		goto cleanup;
 	}
+
+	pty->conin = conin;
+	pty->conout = conout;
+	pty->conerr = conerr;
+	pty->wait = INVALID_HANDLE_VALUE;
 
 	HRESULT hr = CreatePseudoConsole(
 		config->size,
@@ -252,7 +203,7 @@ WINPTY_API winpty_t *winpty_open(const winpty_config_t *config, winpty_error_ptr
 	);
 
 	if (FAILED(hr)) {
-		*err = winpty_error_new(WINPTY_ERROR_UNSPECIFIED, HRESULT_CODE(hr), L"cannot create pty");
+		THROW(WINPTY_ERROR_UNSPECIFIED, HRESULT_CODE(hr), L"cannot create pty");
 		goto cleanup;
 	}
 
@@ -262,6 +213,7 @@ cleanup:
 	if (conin != INVALID_HANDLE_VALUE) CloseHandle(conin);
 	if (conout != INVALID_HANDLE_VALUE) CloseHandle(conout);
 	if (conerr != INVALID_HANDLE_VALUE) CloseHandle(conerr);
+	DeleteCriticalSection(&pty->mutex);
 	if (pty != NULL) free(pty);
 
 	return NULL;
@@ -283,12 +235,8 @@ WINPTY_API LPCWSTR winpty_conerr_name(winpty_t *pty) {
 
 
 // ACTUALLY STARTING PROCESSES
-struct winpty_spawn_config_s {
-	LPWSTR appname, cmdline, cwd, env;
-};
-
 WINPTY_API winpty_spawn_config_t *winpty_spawn_config_new(
-	UINT64 flags,
+	UINT64 flag,
 	LPCWSTR appname,
 	LPCWSTR cmdline,
 	LPCWSTR cwd,
@@ -297,10 +245,11 @@ WINPTY_API winpty_spawn_config_t *winpty_spawn_config_new(
 ) {
 	winpty_spawn_config_t *config = malloc(sizeof(winpty_spawn_config_t));
 	if (config == NULL) {
-		*err = winpty_error_new(WINPTY_ERROR_OUT_OF_MEMORY, 0, NULL);
+		THROW(WINPTY_ERROR_OUT_OF_MEMORY, 0, NULL);
 		return NULL;
 	}
 
+	config->flag = flag;
 	config->appname = appname != NULL ? strdup_w(appname) : NULL;
 	config->cmdline = cmdline != NULL ? strdup_w(cmdline) : NULL;
 	config->cwd = cwd != NULL ? strdup_w(cwd) : NULL;
@@ -317,6 +266,41 @@ WINPTY_API void winpty_spawn_config_free(winpty_spawn_config_t *config) {
 	free(config);
 }
 
+static void free_named_pipes(winpty_t *pty) {
+	// try to flush named pipe
+	if (pty->conout != INVALID_HANDLE_VALUE) {
+		FlushFileBuffers(pty->conout);
+		DisconnectNamedPipe(pty->conout);
+		CloseHandle(pty->conout);
+	}
+
+	if (pty->conerr != INVALID_HANDLE_VALUE) {
+		DisconnectNamedPipe(pty->conerr);
+		CloseHandle(pty->conerr);
+	}
+
+	if (pty->conin != INVALID_HANDLE_VALUE) {
+		DisconnectNamedPipe(pty->conin);
+		CloseHandle(pty->conin);
+	}
+
+	CloseHandle(pty->thread);
+	CloseHandle(pty->proc);
+
+	pty->conin = INVALID_HANDLE_VALUE;
+	pty->conout = INVALID_HANDLE_VALUE;
+	pty->conerr = INVALID_HANDLE_VALUE;
+	pty->thread = INVALID_HANDLE_VALUE;
+	pty->proc = INVALID_HANDLE_VALUE;
+}
+
+VOID CALLBACK auto_shutdown_cb(PVOID param, BOOLEAN expired) {
+	winpty_t *pty = (winpty_t *) param;
+	EnterCriticalSection(&pty->mutex);
+	free_named_pipes(pty);
+	LeaveCriticalSection(&pty->mutex);
+}
+
 WINPTY_API BOOL winpty_spawn(
 	winpty_t *pty,
 	const winpty_spawn_config_t *config,
@@ -325,6 +309,11 @@ WINPTY_API BOOL winpty_spawn(
 	DWORD *create_process_error,
 	winpty_error_ptr_t *err
 ) {
+	EnterCriticalSection(&pty->mutex);
+
+	ConnectNamedPipe(pty->conin, NULL);
+	ConnectNamedPipe(pty->conout, NULL);
+
 	BOOL res = FALSE;
 	STARTUPINFOEXW si = { 0 };
 	si.StartupInfo.cb = sizeof(STARTUPINFOEXW);
@@ -337,14 +326,14 @@ WINPTY_API BOOL winpty_spawn(
 	InitializeProcThreadAttributeList(NULL, 1, 0, &sz);
 	BYTE *attrlist = malloc(sz);
 	if (attrlist == NULL) {
-		*err = winpty_error_new(WINPTY_ERROR_OUT_OF_MEMORY, 0, NULL);
+		THROW(WINPTY_ERROR_OUT_OF_MEMORY, 0, NULL);
 		return FALSE;
 	}
 
 	si.lpAttributeList = (PPROC_THREAD_ATTRIBUTE_LIST) attrlist;
 	res = InitializeProcThreadAttributeList(si.lpAttributeList, 1, 0, &sz);
 	if (!res) {
-		*err = winpty_error_new(WINPTY_ERROR_UNSPECIFIED, GetLastError(), L"InitializeProcThreadAttributeList failed");
+		THROW(WINPTY_ERROR_UNSPECIFIED, GetLastError(), L"InitializeProcThreadAttributeList failed");
 		goto cleanup;
 	}
 
@@ -358,7 +347,7 @@ WINPTY_API BOOL winpty_spawn(
 		NULL
 	);
 	if (!res) {
-		*err = winpty_error_new(WINPTY_ERROR_UNSPECIFIED, GetLastError(), L"UpdateProcThreadAttribute failed");
+		THROW(WINPTY_ERROR_UNSPECIFIED, GetLastError(), L"UpdateProcThreadAttribute failed");
 		goto cleanup;
 	}
 
@@ -376,15 +365,33 @@ WINPTY_API BOOL winpty_spawn(
 		&pi
 	);
 	if (!res) {
-		*err = winpty_error_new(WINPTY_ERROR_SPAWN_CREATE_PROCESS_FAILED, 0, L"CreateProcessW failed");
+		THROW(WINPTY_ERROR_SPAWN_CREATE_PROCESS_FAILED, 0, L"CreateProcessW failed");
 		if (create_process_error != NULL)
 			*create_process_error = GetLastError();
+		goto cleanup;
+	}
+
+	if (config->flag & WINPTY_SPAWN_FLAG_AUTO_SHUTDOWN != 0) {
+		res = RegisterWaitForSingleObject(
+			&pty->wait,
+			pi.hProcess,
+			&auto_shutdown_cb,
+			(PVOID) pty,
+			INFINITE,
+			WT_EXECUTEONLYONCE | WT_EXECUTELONGFUNCTION
+		);
+		if (!res) {
+			THROW(WINPTY_ERROR_UNSPECIFIED, GetLastError(), L"RegisterWaitForSingleObject failed");
+			goto cleanup;
+		}
 	}
 
 	if (process_handle != NULL) *process_handle = pi.hProcess;
-	if (process_handle != NULL) *thread_handle = pi.hThread;
-	pty->thread = pi.hProcess;
+	if (thread_handle != NULL) *thread_handle = pi.hThread;
 	pty->proc = pi.hProcess;
+	pty->thread = pi.hThread;
+
+	LeaveCriticalSection(&pty->mutex);
 
 	return TRUE;
 
@@ -392,18 +399,26 @@ cleanup:
 	DeleteProcThreadAttributeList(si.lpAttributeList);
 	free(si.lpAttributeList);
 
+	LeaveCriticalSection(&pty->mutex);
+
 	return FALSE;
 }
 
 WINPTY_API void winpty_free(winpty_t *pty) {
+	EnterCriticalSection(&pty->mutex);
+
+	if (pty->wait != INVALID_HANDLE_VALUE)
+		UnregisterWait(pty->wait);
+
 	GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, GetProcessId(pty->proc));
 	TerminateProcess(pty->proc, 0);
 
-	WaitForSingleObject(pty->proc, INFINITE); // oh you better pray this works
+	WaitForSingleObject(pty->proc, INFINITE);
+	free_named_pipes(pty);
 
-	CloseHandle(pty->thread);
-	CloseHandle(pty->proc);
-	ClosePseudoConsole(pty->con);
+	LeaveCriticalSection(&pty->mutex);
+	DeleteCriticalSection(&pty->mutex);
+
 	free(pty->conin_name);
 	free(pty->conout_name);
 	free(pty->conerr_name);
@@ -416,7 +431,7 @@ WINPTY_API BOOL winpty_set_size(winpty_t *pty, int cols, int rows, winpty_error_
 	COORD size = { cols, rows };
 	HRESULT hr = ResizePseudoConsole(pty->con, size);
 	if (FAILED(hr)) {
-		*err = winpty_error_new(WINPTY_ERROR_UNSPECIFIED, HRESULT_CODE(hr), L"cannot resize pty");
+		THROW(WINPTY_ERROR_UNSPECIFIED, HRESULT_CODE(hr), L"cannot resize pty");
 		return FALSE;
 	}
 	return TRUE;
@@ -425,7 +440,7 @@ WINPTY_API BOOL winpty_set_size(winpty_t *pty, int cols, int rows, winpty_error_
 WINPTY_API int winpty_get_console_process_list(winpty_t *pty, int *process_list, const int process_count, winpty_error_ptr_t *err) {
 	DWORD *plist = calloc(PROC_LIST_SIZE, sizeof(DWORD));
 	if (plist == NULL) {
-		*err = winpty_error_new(WINPTY_ERROR_OUT_OF_MEMORY, 0, NULL);
+		THROW(WINPTY_ERROR_OUT_OF_MEMORY, 0, NULL);
 		return 0;
 	}
 
@@ -433,7 +448,7 @@ WINPTY_API int winpty_get_console_process_list(winpty_t *pty, int *process_list,
 	if (actual_count > PROC_LIST_SIZE) {
 		plist = realloc(plist, actual_count);
 		if (plist == NULL) {
-			*err = winpty_error_new(WINPTY_ERROR_OUT_OF_MEMORY, 0, NULL);
+			THROW(WINPTY_ERROR_OUT_OF_MEMORY, 0, NULL);
 			return 0;
 		}
 		actual_count = GetConsoleProcessList(plist, actual_count);
