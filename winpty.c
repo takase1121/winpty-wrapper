@@ -159,7 +159,7 @@ WINPTY_API winpty_t *winpty_open(const winpty_config_t *config, winpty_error_ptr
 		*err = winpty_error_new(WINPTY_ERROR_OUT_OF_MEMORY, 0, NULL);
 		return NULL;
 	}
-	
+
 	InitializeCriticalSection(&pty->mutex);
 
 	HANDLE conin = create_pipe(&pty->conin_name);
@@ -266,7 +266,8 @@ WINPTY_API void winpty_spawn_config_free(winpty_spawn_config_t *config) {
 	free(config);
 }
 
-static void free_named_pipes(winpty_t *pty) {
+static void close_pty(winpty_t *pty) {
+	ClosePseudoConsole(pty->con);
 	// try to flush named pipe
 	if (pty->conout != INVALID_HANDLE_VALUE) {
 		FlushFileBuffers(pty->conout);
@@ -283,7 +284,6 @@ static void free_named_pipes(winpty_t *pty) {
 		DisconnectNamedPipe(pty->conin);
 		CloseHandle(pty->conin);
 	}
-
 	CloseHandle(pty->thread);
 	CloseHandle(pty->proc);
 
@@ -297,7 +297,7 @@ static void free_named_pipes(winpty_t *pty) {
 VOID CALLBACK auto_shutdown_cb(PVOID param, BOOLEAN expired) {
 	winpty_t *pty = (winpty_t *) param;
 	EnterCriticalSection(&pty->mutex);
-	free_named_pipes(pty);
+	close_pty(pty);
 	LeaveCriticalSection(&pty->mutex);
 }
 
@@ -414,7 +414,7 @@ WINPTY_API void winpty_free(winpty_t *pty) {
 	TerminateProcess(pty->proc, 0);
 
 	WaitForSingleObject(pty->proc, INFINITE);
-	free_named_pipes(pty);
+	close_pty(pty);
 
 	LeaveCriticalSection(&pty->mutex);
 	DeleteCriticalSection(&pty->mutex);
