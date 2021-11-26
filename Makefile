@@ -12,4 +12,13 @@ release: winpty.dll
 winpty.dll: winpty.c util.h
 	$(CC) -o $@ $< ${CFLAGS}
 
-.PHONY: debug release
+dist: release
+	mkdir -p bin
+	cp winpty.dll bin
+	tar -czf winpty.tar.gz bin include
+
+clean:
+	rm -rf bin
+	rm -f *.dll *.tar.gz
+
+.PHONY: debug release dist clean
