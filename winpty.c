@@ -260,6 +260,11 @@ cleanup:
 	return NULL;
 }
 
+WINPTY_API HANDLE winpty_agent_process(winpty_t *pty) {
+	ASSERT(pty != NULL);
+	return INVALID_HANDLE_VALUE;
+}
+
 
 // PIPES
 WINPTY_API LPCWSTR winpty_conin_name(winpty_t *pty) {
