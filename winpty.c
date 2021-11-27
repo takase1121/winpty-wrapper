@@ -102,7 +102,7 @@ out_of_memory:
 		*err = winpty_error_new(code, rc, msg)
 
 WINPTY_API winpty_result_t winpty_error_code(winpty_error_ptr_t err) {
-	return err->code;
+	return err != NULL ? err->code : WINPTY_ERROR_SUCCESS;
 }
 
 WINPTY_API LPCWSTR winpty_error_msg(winpty_error_ptr_t err) {
