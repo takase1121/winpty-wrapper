@@ -164,11 +164,13 @@ WINPTY_API void winpty_config_free(winpty_config_t *config) {
 }
 
 WINPTY_API void winpty_config_set_initial_size(winpty_config_t *config, int cols, int rows) {
+	ASSERT(config != NULL && cols > 0 && rows > 0);
 	config->size.X = cols;
 	config->size.Y = rows;
 }
 
 WINPTY_API void winpty_config_set_mouse_mode(winpty_config_t *config, int mode) {
+	ASSERT(config != NULL && mode >= WINPTY_MOUSE_MODE_NONE && mode <= WINPTY_MOUSE_MODE_FORCE);
 	config->mouse_mode = mode;
 }
 
@@ -195,6 +197,7 @@ static HANDLE create_pipe(LPWSTR *pipe_name) {
 }
 
 WINPTY_API winpty_t *winpty_open(const winpty_config_t *config, winpty_error_ptr_t *err) {
+	ASSERT(config != NULL);
 	winpty_t *pty = calloc(1, sizeof(winpty_t));
 	if (pty == NULL) {
 		THROW(WINPTY_ERROR_OUT_OF_MEMORY, 0, NULL);
@@ -268,14 +271,17 @@ WINPTY_API HANDLE winpty_agent_process(winpty_t *pty) {
 
 // PIPES
 WINPTY_API LPCWSTR winpty_conin_name(winpty_t *pty) {
+	ASSERT(pty != NULL);
 	return pty->conin_name;
 }
 
 WINPTY_API LPCWSTR winpty_conout_name(winpty_t *pty) {
+	ASSERT(pty != NULL);
 	return pty->conout_name;
 }
 
 WINPTY_API LPCWSTR winpty_conerr_name(winpty_t *pty) {
+	ASSERT(pty != NULL);
 	return pty->conerr_name;
 }
 
@@ -289,6 +295,7 @@ WINPTY_API winpty_spawn_config_t *winpty_spawn_config_new(
 	LPCWSTR env,
 	winpty_error_ptr_t *err
 ) {
+	ASSERT(flag & WINPTY_SPAWN_FLAG_MASK == flag);
 	winpty_spawn_config_t *config = malloc(sizeof(winpty_spawn_config_t));
 	if (config == NULL) {
 		THROW(WINPTY_ERROR_OUT_OF_MEMORY, 0, NULL);
@@ -355,6 +362,7 @@ WINPTY_API BOOL winpty_spawn(
 	DWORD *create_process_error,
 	winpty_error_ptr_t *err
 ) {
+	ASSERT(pty != NULL && config != NULL);
 	EnterCriticalSection(&pty->mutex);
 
 	ConnectNamedPipe(pty->conin, NULL);
@@ -474,6 +482,7 @@ WINPTY_API void winpty_free(winpty_t *pty) {
 
 // OTHERS
 WINPTY_API BOOL winpty_set_size(winpty_t *pty, int cols, int rows, winpty_error_ptr_t *err) {
+	ASSERT(pty != NULL && cols > 0 && rows > 0);
 	COORD size = { cols, rows };
 	HRESULT hr = ResizePseudoConsole(pty->con, size);
 	if (FAILED(hr)) {
@@ -484,6 +493,9 @@ WINPTY_API BOOL winpty_set_size(winpty_t *pty, int cols, int rows, winpty_error_
 }
 
 WINPTY_API int winpty_get_console_process_list(winpty_t *pty, int *process_list, const int process_count, winpty_error_ptr_t *err) {
+	ASSERT(pty != NULL);
+	ASSERT(process_list != NULL);
+
 	DWORD *plist = calloc(PROC_LIST_SIZE, sizeof(DWORD));
 	if (plist == NULL) {
 		THROW(WINPTY_ERROR_OUT_OF_MEMORY, 0, NULL);

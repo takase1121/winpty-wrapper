@@ -1,6 +1,7 @@
 #ifndef UTIL_H
 #define UTIL_H
 
+#include <stdio.h>
 #include <wchar.h>
 #include <windows.h>
 
@@ -30,5 +31,14 @@ static LPWSTR win32_error(DWORD rc) {
 
 	return msg;
 }
+
+#define ASSERT(cond)																	\
+	do {																				\
+		if (!(cond)) {																	\
+			fprintf(stderr, "assertion failed (%s:%s): %s", __FILE__, __LINE__, #cond);	\
+			assert(FALSE && #cond);														\
+			abort();																	\
+		}																				\
+	} while (0)
 
 #endif
