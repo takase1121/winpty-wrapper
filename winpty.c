@@ -197,7 +197,7 @@ static HANDLE create_pipe(LPWSTR *pipe_name) {
 WINPTY_API winpty_t *winpty_open(const winpty_config_t *config, winpty_error_ptr_t *err) {
 	winpty_t *pty = calloc(1, sizeof(winpty_t));
 	if (pty == NULL) {
-		*err = winpty_error_new(WINPTY_ERROR_OUT_OF_MEMORY, 0, NULL);
+		THROW(WINPTY_ERROR_OUT_OF_MEMORY, 0, NULL);
 		return NULL;
 	}
 
