@@ -20,14 +20,15 @@ jobs:
         uses: msys2/setup-msys2@v2
         with:
           msystem: ${{matrix.msystem}}
-          update: true
       - name: disable certain things
         run: |
           mkpasswd > /etc/passwd
           mkgroup > /etc/group
           sed -i '/db/d'
       - name: install packages
-        run: pacman -Sy git mingw-w64-${{matrix.env}}-gcc mingw-w64-${{matrix.env}}-make
+        run: |
+          pacman -Syuu
+          pacman -Sy git mingw-w64-${{matrix.env}}-gcc mingw-w64-${{matrix.env}}-make
       - name: Build
         run: mingw32-make dist
       - name: Upload artifacts
