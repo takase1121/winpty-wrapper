@@ -27,7 +27,7 @@ jobs:
           sed -i '/db/d' /etc/nsswitch.conf
       - name: install packages
         run: |
-          pacman --noconfirm -Syuu
+          pacman --noconfirm -Syu
           pacman --noconfirm -Sy git mingw-w64-${{matrix.env}}-gcc mingw-w64-${{matrix.env}}-make
       - name: Build
         run: mingw32-make dist
