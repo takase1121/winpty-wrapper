@@ -24,7 +24,7 @@ jobs:
         run: |
           mkpasswd > /etc/passwd
           mkgroup > /etc/group
-          sed -i '/db/d'
+          sed -i '/db/d' /etc/nsswitch.conf
       - name: install packages
         run: |
           pacman -Syuu
